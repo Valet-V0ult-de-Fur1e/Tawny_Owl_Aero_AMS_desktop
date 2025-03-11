@@ -1,8 +1,9 @@
+from datetime import datetime
 import sys
 import os
 import requests
 from PyQt6.QtWidgets import *
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QDateTime
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QDateTime, QThread, QMutex
 from PyQt6.QtGui import QFont
 import cv2
 import platform
@@ -11,6 +12,7 @@ from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                             QPushButton, QGridLayout, QMessageBox)
 import json
+import numpy as np
 
 class AppState:
     """Глобальное состояние приложения"""
@@ -543,279 +545,307 @@ class ShootingSetupPage(QWidget):
         self.window.state.flight_number = self.number_input.text()
 
 
-import os
-import json
+# class CameraWorker(QThread):
+#     frame_ready = pyqtSignal(int, QImage, object)  # (cam_id, preview, original_frame)
+#     error_occurred = pyqtSignal(int, str)
+
+#     def __init__(self, camera_id):
+#         super().__init__()
+#         self.camera_id = camera_id
+#         self.running = True
+#         self.mutex = QMutex()
+
+#     def run(self):
+#         cap = cv2.VideoCapture(self.camera_id)
+
+#         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 3840)
+#         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 2160)
+
+#         if not cap.isOpened():
+#             self.error_occurred.emit(self.camera_id, "Не удалось открыть камеру")
+#             return
+
+#         while self.running:
+#             self.mutex.lock()
+#             ret, frame = cap.read()
+#             if ret:
+#                 # Готовим превью для отображения (размер 640x480)
+#                 preview_frame = cv2.resize(frame, (640, 480))
+#                 rgb_preview = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
+#                 h, w, ch = rgb_preview.shape
+#                 bytes_per_line = ch * w
+#                 qt_image = QImage(rgb_preview.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+#                 self.frame_ready.emit(self.camera_id, qt_image, frame)
+#             self.mutex.unlock()
+#             QThread.msleep(30)
+#         cap.release()
+
+#     def stop(self):
+#         self.running = False
+#         self.wait()
+
+from PyQt6.QtWidgets import *
+from PyQt6.QtCore import Qt, QThread, QMutex, QMutexLocker, pyqtSignal
+from PyQt6.QtGui import QImage, QPixmap
 import cv2
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QLineEdit
-from PyQt6.QtCore import Qt
-
-# class ShootingControlPage(QWidget):
-#     def __init__(self, parent):
-#         super().__init__(parent)
-#         self.window = parent
-#         self.cameras = []
-#         self.current_shot_index = 0
-#         self.camera_mode = self.window.state.camera_mode
-#         self.gopro_manager = GoProManager()
-#         self.init_ui()
-#         self.find_cameras()
-
-#     def init_ui(self):
-#         main_layout = QVBoxLayout(self)
-
-#         title = QLabel("Управление съемкой")
-#         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-#         title.setStyleSheet("font-size: 24px; font-weight: bold;")
-#         main_layout.addWidget(title)
-
-#         self.shot_index_input = QLineEdit(self)
-#         self.shot_index_input.setPlaceholderText("Введите номер пролета")
-#         main_layout.addWidget(self.shot_index_input)
-
-#         if self.camera_mode == 'video':
-#             self.start_record_btn = QPushButton("Начать запись")
-#             self.pause_record_btn = QPushButton("Пауза")
-#             self.stop_record_btn = QPushButton("Завершить запись")
-#             self.start_record_btn.clicked.connect(self.start_recording)
-#             self.pause_record_btn.clicked.connect(self.pause_recording)
-#             self.stop_record_btn.clicked.connect(self.stop_recording)
-
-#             main_layout.addWidget(self.start_record_btn)
-#             main_layout.addWidget(self.pause_record_btn)
-#             main_layout.addWidget(self.stop_record_btn)
-
-#         elif self.camera_mode == 'photo':
-#             self.capture_photo_btn = QPushButton("Сделать фото")
-#             self.capture_photo_btn.clicked.connect(self.take_photo)
-#             main_layout.addWidget(self.capture_photo_btn)
-
-#         nav_layout = QHBoxLayout()
-#         back_btn = QPushButton("< Назад")
-#         back_btn.clicked.connect(lambda: self.window.navigate_to(MainPage))
-#         finish_btn = QPushButton("Завершить осмотр")
-#         finish_btn.clicked.connect(lambda: self.window.navigate_to(MainPage))
-#         nav_layout.addWidget(back_btn)
-#         nav_layout.addStretch()
-#         nav_layout.addWidget(finish_btn)
-#         main_layout.addLayout(nav_layout)
-
-#     def find_cameras(self):
-#         self.cameras = []
-#         for i in range(4):
-#             try:
-#                 cap = cv2.VideoCapture(i)
-#                 if cap.isOpened():
-#                     self.cameras.append({'type': 'webcam', 'index': i, 'capture': cap})
-#                     cap.release()
-#             except:
-#                 pass
-
-#         if self.gopro_manager.detect():
-#             self.cameras.append({'type': 'gopro', 'index': 0})
-
-#     def start_recording(self):
-#         for cam in self.cameras:
-#             if cam['type'] == 'webcam':
-#                 print(f"Запуск записи на веб-камере {cam['index']}")
-#             elif cam['type'] == 'gopro':
-#                 print("Запуск записи на GoPro")
-
-#     def pause_recording(self):
-#         for cam in self.cameras:
-#             if cam['type'] == 'webcam':
-#                 print(f"Пауза записи на веб-камере {cam['index']}")
-#             elif cam['type'] == 'gopro':
-#                 print("Пауза записи на GoPro")
-
-#     def stop_recording(self):
-#         video_data = []
-#         for cam in self.cameras:
-#             if cam['type'] == 'webcam':
-#                 video_info = {'id': cam['index'], 'name': f"video_{cam['index']}", 'format': 'mp4'}
-#                 video_data.append(video_info)
-#                 print(f"Остановка записи на веб-камере {cam['index']}")
-#             elif cam['type'] == 'gopro':
-#                 print("Остановка записи на GoPro")
-
-#         self.save_videos(video_data)
-
-#     def take_photo(self):
-#         photo_data = []
-#         for cam in self.cameras:
-#             if cam['type'] == 'webcam':
-#                 photo_info = {'camera_id': cam['index'], 'photo_id': f"photo_{cam['index']}"}
-#                 photo_data.append(photo_info)
-#                 print(f"Фото сделано на веб-камере {cam['index']}")
-#             elif cam['type'] == 'gopro':
-#                 print("Фото сделано на GoPro")
-
-#         self.save_photos(photo_data)
-
-#     def save_videos(self, video_data):
-#         video_folder = 'videos'
-#         os.makedirs(video_folder, exist_ok=True)
-#         with open(os.path.join(video_folder, 'metadata.json'), 'w') as json_file:
-#             json.dump(video_data, json_file)
-
-#     def save_photos(self, photo_data):
-#         photo_folder = 'photos'
-#         os.makedirs(photo_folder, exist_ok=True)
-#         with open(os.path.join(photo_folder, 'metadata.json'), 'w') as json_file:
-#             json.dump(photo_data, json_file)
-
-#     def closeEvent(self, event):
-#         for cam in self.cameras:
-#             if cam['type'] == 'webcam' and 'capture' in cam:
-#                 cam['capture'].release()
-#         event.accept()  # Завершение события закрытия
+import os
+import numpy as np
+from datetime import datetime
 
 class ShootingControlPage(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
+        self.recording_paused = False
+        self.session_folder = ""
         self.window = parent
-        self.cameras = []
-        self.current_shot_index = 0
         self.camera_mode = self.window.state.camera_mode
-        self.gopro_manager = GoProManager()
+        self.camera_ids = []
+        self.workers = []
+        self.video_writers = {}
+        self.preview_labels = {}
+        self.is_recording = False
+        self.preview_mutex = QMutex()  # Мьютекс для синхронизации превью
         self.init_ui()
-        self.find_cameras()
-        self.video_writers = []  # Список для хранения объектов VideoWriter
-
+        self.init_cameras()
+        
     def init_ui(self):
         main_layout = QVBoxLayout(self)
-
-        title = QLabel("Управление съемкой")
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Заголовок и сетка превью
+        title = QLabel(f"Режим {'видео' if self.camera_mode == 'video' else 'фото'}")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 24px; font-weight: bold;")
+        title.setStyleSheet("font: bold 20px;")
         main_layout.addWidget(title)
+        
+        self.preview_grid = QGridLayout()
+        main_layout.addLayout(self.preview_grid)
+        
+        # Панель управления
+        self.init_control_panel(main_layout)
+    
+    def init_control_panel(self, main_layout):
+        control_layout = QHBoxLayout()
+        
+        # Кнопка "Назад"
+        back_btn = QPushButton("Назад")
+        back_btn.setFixedSize(100, 40)
+        back_btn.clicked.connect(self.return_to_main)
+        
+        # Группа кнопок режима
+        mode_btn_layout = QHBoxLayout()
+        
+        if self.camera_mode == "video":
+            self.record_btn = QPushButton("Запись")
+            self.pause_btn = QPushButton("Пауза")
+            self.finish_btn = QPushButton("Закончить съёмку")
+            
+            self.record_btn.setStyleSheet("background-color: #27ae60; color: white;")
+            self.pause_btn.setStyleSheet("background-color: #f1c40f; color: black;")
+            self.finish_btn.setStyleSheet("background-color: #e74c3c; color: white;")
+            
+            self.record_btn.clicked.connect(self.start_recording)
+            self.pause_btn.clicked.connect(self.toggle_pause)
+            self.finish_btn.clicked.connect(self.finish_recording)
+            
+            mode_btn_layout.addWidget(self.record_btn)
+            mode_btn_layout.addWidget(self.pause_btn)
+            mode_btn_layout.addWidget(self.finish_btn)
+            
+            self.pause_btn.setEnabled(False)
+            self.finish_btn.setEnabled(False)
+            
+        else:  # photo mode
+            self.shoot_btn = QPushButton("Сделать фото")
+            self.finish_btn = QPushButton("Закончить съёмку")
+            
+            self.shoot_btn.setStyleSheet("background-color: #27ae60; color: white;")
+            self.finish_btn.setStyleSheet("background-color: #e74c3c; color: white;")
+            
+            self.shoot_btn.clicked.connect(self.capture_photos)
+            self.finish_btn.clicked.connect(self.finish_photo_session)
+            
+            mode_btn_layout.addWidget(self.shoot_btn)
+            mode_btn_layout.addWidget(self.finish_btn)
 
-        self.shot_index_input = QLineEdit(self)
-        self.shot_index_input.setPlaceholderText("Введите номер пролета")
-        main_layout.addWidget(self.shot_index_input)
+        control_layout.addWidget(back_btn)
+        control_layout.addStretch()
+        control_layout.addLayout(mode_btn_layout)
+        main_layout.addLayout(control_layout)
 
-        if self.camera_mode == 'video':
-            self.start_record_btn = QPushButton("Начать запись")
-            self.pause_record_btn = QPushButton("Пауза")
-            self.stop_record_btn = QPushButton("Завершить запись")
-            self.start_record_btn.clicked.connect(self.start_recording)
-            self.pause_record_btn.clicked.connect(self.pause_recording)
-            self.stop_record_btn.clicked.connect(self.stop_recording)
-
-            main_layout.addWidget(self.start_record_btn)
-            main_layout.addWidget(self.pause_record_btn)
-            main_layout.addWidget(self.stop_record_btn)
-
-        elif self.camera_mode == 'photo':
-            self.capture_photo_btn = QPushButton("Сделать фото")
-            self.capture_photo_btn.clicked.connect(self.take_photo)
-            main_layout.addWidget(self.capture_photo_btn)
-
-        nav_layout = QHBoxLayout()
-        back_btn = QPushButton("< Назад")
-        back_btn.clicked.connect(lambda: self.window.navigate_to(MainPage))
-        finish_btn = QPushButton("Завершить осмотр")
-        finish_btn.clicked.connect(lambda: self.window.navigate_to(MainPage))
-        nav_layout.addWidget(back_btn)
-        nav_layout.addStretch()
-        nav_layout.addWidget(finish_btn)
-        main_layout.addLayout(nav_layout)
-
-    def find_cameras(self):
-        self.cameras = []
-        for i in range(4):
-            try:
-                cap = cv2.VideoCapture(i)
-                if cap.isOpened():
-                    self.cameras.append({'type': 'webcam', 'index': i, 'capture': cap})
-                    cap.release()
-            except Exception as e:
-                print(f"Ошибка при подключении к камере {i}: {e}")
-
-        if self.gopro_manager.detect():
-            self.cameras.append({'type': 'gopro', 'index': 0})
+    def create_session_folder(self):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder_name = "video" if self.camera_mode == "video" else "photo"
+        self.session_folder = os.path.join(folder_name, f"session_{timestamp}")
+        os.makedirs(self.session_folder, exist_ok=True)
+    
+    def init_cameras(self):
+        # Автопоиск доступных камер
+        self.camera_ids = self.detect_available_cameras()
+        
+        # Создание превью-контейнеров
+        for i, cam_id in enumerate(self.camera_ids):
+            container = QGroupBox(f"Камера {cam_id}")
+            layout = QVBoxLayout()
+            
+            preview_label = QLabel()
+            preview_label.setMinimumSize(320, 240)
+            preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            preview_label.setStyleSheet("background: #222;")
+            
+            layout.addWidget(preview_label)
+            container.setLayout(layout)
+            self.preview_grid.addWidget(container, i//2, i%2)
+            with QMutexLocker(self.preview_mutex):
+                self.preview_labels[cam_id] = preview_label
+            
+            # Запуск потока захвата кадров
+            self.start_camera_stream(cam_id)
+    
+    def detect_available_cameras(self, max_check=4):
+        available = []
+        for i in range(max_check):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                available.append(i)
+                cap.release()
+            else:
+                cap.release()
+                break
+        return available
 
     def start_recording(self):
-        for cam in self.cameras:
-            if cam['type'] == 'webcam':
-                print(f"Запуск записи на веб-камере {cam['index']}")
-                cap = cv2.VideoCapture(cam['index'])
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Кодек для mp4
-                video_path = os.path.join('videos', f"video_{cam['index']}.mp4")
-                self.video_writers.append(cv2.VideoWriter(video_path, fourcc, 30.0, (640, 480)))  # 640x480 - разрешение
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    self.video_writers[-1].write(frame)  # Запись кадра
-                cap.release()
+        self.create_session_folder()
+        self.is_recording = True
+        self.recording_paused = False
+        self.record_btn.setEnabled(False)
+        self.pause_btn.setEnabled(True)
+        self.finish_btn.setEnabled(True)
+        
+        for cam_id in self.camera_ids:
+            filename = os.path.join(self.session_folder, f"camera_{cam_id}.avi")
+            self.video_writers[cam_id] = cv2.VideoWriter(
+                filename, cv2.VideoWriter_fourcc(*'XVID'), 30.0, (1920, 1080))
 
-            elif cam['type'] == 'gopro':
-                print("Запуск записи на GoPro (здесь должна быть логика для GoPro)")
+    def toggle_pause(self):
+        self.recording_paused = not self.recording_paused
+        self.pause_btn.setText("Продолжить" if self.recording_paused else "Пауза")
 
-    def pause_recording(self):
-        # Логика для паузы записи камер (не реализована в этом примере)
-        print("Пауза записи (реализация зависит от используемых камер)")
+    def start_camera_stream(self, cam_id):
+        worker = CameraWorker(cam_id)
+        worker.frame_ready.connect(self.update_preview)
+        worker.start()
+        self.workers.append(worker)
+    
+    def update_preview(self, cam_id, qt_image, original_frame):
+        locker = QMutexLocker(self.preview_mutex)  # Блокировка мьютекса
+        
+        if cam_id in self.preview_labels:
+            preview_label = self.preview_labels[cam_id]
+            # Проверка на существование виджета
+            if preview_label and preview_label.parent() is not None:
+                preview_label.setPixmap(
+                    QPixmap.fromImage(qt_image).scaled(
+                        320, 240, 
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                )
+        
+        if self.is_recording and self.camera_mode == "video" and not self.recording_paused:
+            self.video_writers[cam_id].write(original_frame)
 
-    def stop_recording(self):
-        for index, cam in enumerate(self.cameras):
-            if cam['type'] == 'webcam':
-                print(f"Остановка записи на веб-камере {cam['index']}")
-                if index < len(self.video_writers):
-                    self.video_writers[index].release()  # Освобождение ресурсов VideoWriter
+    def finish_recording(self):
+        self.is_recording = False
+        self.recording_paused = False
+        for writer in self.video_writers.values():
+            writer.release()
+        self.video_writers.clear()
+        self.record_btn.setEnabled(True)
+        self.pause_btn.setEnabled(False)
+        self.finish_btn.setEnabled(False)
+        self.window.navigate_to(MainPage)
 
-        self.save_videos()
+    def get_worker(self, cam_id):
+        """Возвращает worker для указанной камеры"""
+        for worker in self.workers:
+            if worker.camera_id == cam_id:
+                return worker
+        return None
 
-    def take_photo(self):
-        photo_data = []
-        for cam in self.cameras:
-            if cam['type'] == 'webcam':
-                cap = cv2.VideoCapture(cam['index'])
+    def capture_photos(self):
+        try:
+            self.create_session_folder()
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for cam_id in self.camera_ids:
+                worker = self.get_worker(cam_id)
+                if worker and worker.last_frame is not None:
+                    filename = os.path.join(self.session_folder, 
+                                          f"photo_{timestamp}_cam{cam_id}.jpg")
+                    cv2.imwrite(filename, worker.last_frame)
+            
+            QMessageBox.information(self, "Успех", f"Фото сохранены в папку:\n{self.session_folder}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка при сохранении фото: {str(e)}")
+
+    def finish_photo_session(self):
+        self.cleanup()
+        self.window.navigate_to(MainPage)
+
+    def return_to_main(self):
+        self.cleanup()
+        self.window.navigate_to(MainPage)
+
+    def cleanup(self):
+        # Остановка всех потоков
+        for worker in self.workers:
+            worker.stop()
+        
+        # Очистка превью с блокировкой
+        with QMutexLocker(self.preview_mutex):
+            self.preview_labels.clear()
+        
+        if self.camera_mode == "video":
+            self.finish_recording()
+
+class CameraWorker(QThread):
+    frame_ready = pyqtSignal(int, QImage, np.ndarray)
+    
+    def __init__(self, camera_id):
+        super().__init__()
+        self.camera_id = camera_id
+        self.running = True
+        self.last_frame = None
+        self.mutex = QMutex()  # Мьютекс для синхронизации
+
+    def run(self):
+        cap = cv2.VideoCapture(self.camera_id)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 3840)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 2160)
+
+        while self.running:
+            with QMutexLocker(self.mutex):
+                if not self.running:
+                    break
+                
                 ret, frame = cap.read()
                 if ret:
-                    photo_path = os.path.join('photos', f"photo_{cam['index']}.jpg")
-                    cv2.imwrite(photo_path, frame)
-                    photo_data.append({
-                        'camera_id': cam['index'],
-                        'photo_id': f"photo_{cam['index']}.jpg"
-                    })
-                    print(f"Фото сохранено: {photo_path}")
-                cap.release()
+                    self.last_frame = frame.copy()
+                    preview = cv2.resize(frame, (640, 480))
+                    rgb_preview = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+                    h, w, ch = rgb_preview.shape
+                    qt_img = QImage(rgb_preview.data, w, h, QImage.Format.Format_RGB888)
+                    self.frame_ready.emit(self.camera_id, qt_img, frame)
+            QThread.msleep(30)
+        
+        cap.release()
 
-            elif cam['type'] == 'gopro':
-                print("Фото сделано на GoPro (здесь должна быть логика для GoPro)")
-
-        self.save_photos(photo_data)
-
-    def save_videos(self):
-        video_folder = 'videos'
-        os.makedirs(video_folder, exist_ok=True)
-        video_data = []
-        for index, cam in enumerate(self.cameras):
-            if cam['type'] == 'webcam':
-                video_info = {
-                    'id': cam['index'],
-                    'name': f"video_{cam['index']}.mp4",
-                    'format': 'mp4'
-                }
-                video_data.append(video_info)
-
-        with open(os.path.join(video_folder, 'metadata.json'), 'w') as json_file:
-            json.dump(video_data, json_file)
-
-    def save_photos(self, photo_data):
-        photo_folder = 'photos'
-        os.makedirs(photo_folder, exist_ok=True)
-        with open(os.path.join(photo_folder, 'metadata.json'), 'w') as json_file:
-            json.dump(photo_data, json_file)
-
-    def closeEvent(self, event):
-        for cam in self.cameras:
-            if cam['type'] == 'webcam' and 'capture' in cam:
-                cam['capture'].release()
-        for writer in self.video_writers:
-            writer.release()  # Освобождение ресурсов VideoWriter
-        event.accept()  # Завершение события закрытия
-
+    def stop(self):
+        with QMutexLocker(self.mutex):
+            self.running = False
+        self.wait()
+        
+        
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     if not os.path.exists("photos"):

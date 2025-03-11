@@ -686,6 +686,7 @@ class ShootingControlPage(QWidget):
             self.start_recording()
         else:
             self.stop_recording()
+    
 
     def start_recording(self):
         self.is_recording = True
@@ -694,11 +695,10 @@ class ShootingControlPage(QWidget):
         
         if self.camera_mode == "video":
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            fourcc = cv2.VideoWriter_fourcc(*'XVID')
             for cam_id in self.camera_ids:
                 self.video_writers[cam_id] = cv2.VideoWriter(
                     f"video_{timestamp}_cam{cam_id}.avi",
-                    fourcc, 30, (3840, 2160)
+                    cv2.VideoWriter_fourcc(*'XVID'), 30, (3840, 2160)
                 )
         else:
             QTimer.singleShot(100, self.capture_photos)
