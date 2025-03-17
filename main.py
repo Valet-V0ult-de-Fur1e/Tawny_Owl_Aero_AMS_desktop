@@ -627,7 +627,11 @@ class ShootingControlPage(QWidget):
     def updated_point_b(self):
         self.create_session_folder(self.selected_point)
         self.selected_point = int(self.selected_point)
-        self.selected_point += 1
+        if self.window.state.location_data['direction'] == "Назад":
+            if self.selected_point > 1:
+                self.selected_point -= 1
+        else:
+            self.selected_point += 1
         self.count_try = 1
         self.count_try_label_2.setText("1")
         self.selected_point_count_input.setText(str(self.selected_point))
