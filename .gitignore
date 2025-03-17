@@ -2,7 +2,11 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+dev/
+dev1/
+other/
+photo/
+video/
 # C extensions
 *.so
 v1/

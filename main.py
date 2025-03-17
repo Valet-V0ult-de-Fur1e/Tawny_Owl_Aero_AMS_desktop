@@ -2,14 +2,14 @@ from datetime import datetime
 import sys
 import os
 import requests
-from PyQt6.QtWidgets import *
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QDateTime, QThread, QMutex
-from PyQt6.QtGui import QFont
+from PySide6.QtWidgets import *
+from PySide6.QtCore import Qt, QTimer, Signal, QObject, QDateTime, QThread, QMutex
+from PySide6.QtGui import QFont
 import cv2
 import platform
 import subprocess
-from PyQt6.QtGui import QImage, QPixmap
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                             QPushButton, QGridLayout, QMessageBox)
 import json
 import numpy as np
@@ -21,7 +21,7 @@ class AppState:
         self.direction = ""
         self.location_data = {}
         self.connection_status = False
-        self.flight_number = "1"
+        self.flight_number = 1
         self.start_point = ""
 
 class MainWindow(QMainWindow):
@@ -303,7 +303,7 @@ class LocationPage(QWidget):
 
 
 class GoProManager(QObject):
-    status_changed = pyqtSignal(str)
+    status_changed = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -523,7 +523,7 @@ class ShootingSetupPage(QWidget):
 
     def load_state(self):
         state = self.window.state
-        self.number_input.setText(state.flight_number)
+        self.number_input.setText(str(state.flight_number))
         state.start_point = "Начало пролета"
         if state.camera_mode == "video":
             self.shoot_btn.setText("Начать видеозапись")
@@ -545,49 +545,20 @@ class ShootingSetupPage(QWidget):
         self.window.state.flight_number = self.number_input.text()
 
 
-class CameraWorker(QThread):
-    frame_ready = pyqtSignal(int, QImage, np.ndarray)  # (cam_id, preview, original_frame)
-    error_occurred = pyqtSignal(int, str)
-
-    def __init__(self, camera_id):
-        super().__init__()
-        self.camera_id = camera_id
-        self.running = True
-        self.mutex = QMutex()
-
-    def run(self):
-        cap = cv2.VideoCapture(self.camera_id)
-
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 3840)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 2160)
-
-        if not cap.isOpened():
-            self.error_occurred.emit(self.camera_id, "Не удалось открыть камеру")
-            return
-
-        while self.running:
-            self.mutex.lock()
-            ret, frame = cap.read()
-            if ret:
-                # Готовим превью для отображения (размер 640x480)
-                preview_frame = cv2.resize(frame, (640, 480))
-                rgb_preview = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
-                h, w, ch = rgb_preview.shape
-                bytes_per_line = ch * w
-                qt_image = QImage(rgb_preview.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-                self.frame_ready.emit(self.camera_id, qt_image, frame)
-            self.mutex.unlock()
-            QThread.msleep(30)
-        cap.release()
-
-    def stop(self):
-        self.running = False
-        self.wait()
-
+from PySide6.QtWidgets import *
+from PySide6.QtCore import Qt, QThread, QMutex, QMutexLocker, Signal
+from PySide6.QtGui import QImage, QPixmap
+import cv2
+import os
+import numpy as np
+from datetime import datetime
 
 class ShootingControlPage(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
+        self.stop_count = 0
+        self.recording_paused = False
+        self.session_folder = ""
         self.window = parent
         self.camera_mode = self.window.state.camera_mode
         self.camera_ids = []
@@ -595,35 +566,126 @@ class ShootingControlPage(QWidget):
         self.video_writers = {}
         self.preview_labels = {}
         self.is_recording = False
+        self.preview_mutex = QMutex()  # Мьютекс для синхронизации превью
+        self.selected_point = self.window.state.flight_number
+        self.count_try = 1
+        self.create_session_folder(self.selected_point)
         self.init_ui()
         self.init_cameras()
-
+        
     def init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
         
-        # Заголовок и сетка превью
+        
         title = QLabel(f"Режим {'видео' if self.camera_mode == 'video' else 'фото'}")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("font: bold 20px;")
         main_layout.addWidget(title)
         
+        if self.camera_mode != "video":
+            params_layout_point = QHBoxLayout()
+            
+            self.label_selected_point_count = QLabel("Выбран пролёт")
+            
+            self.selected_point_count_input = QLineEdit(str(self.selected_point))
+            self.selected_point_count_input.textChanged.connect(self.updated_point_l)
+            
+            self.button_update = QPushButton("+")
+            self.button_update.clicked.connect(self.updated_point_b)
+            
+            params_layout_point.addWidget(self.label_selected_point_count)
+            params_layout_point.addWidget(self.selected_point_count_input)
+            params_layout_point.addWidget(self.button_update)
+            main_layout.addLayout(params_layout_point)
+
+            params_layout_count = QHBoxLayout()
+
+            self.count_try_label_1 = QLabel("Остановок на пролёте")
+            self.count_try_label_2 = QLabel(f"{self.count_try}")
+
+            params_layout_count.addWidget(self.count_try_label_1)
+            params_layout_count.addWidget(self.count_try_label_2)
+
+            main_layout.addLayout(params_layout_count)
+
         self.preview_grid = QGridLayout()
         main_layout.addLayout(self.preview_grid)
         
-        # Панель управления
-        control_panel = QHBoxLayout()
-        self.record_btn = QPushButton("СТАРТ", self)
-        self.record_btn.setFixedSize(150, 40)
-        self.record_btn.clicked.connect(self.toggle_recording)
+        self.init_control_panel(main_layout)
+    
+    def updated_point_l(self, text):
+        print(self.selected_point_count_input.text)
+        self.create_session_folder(self.selected_point)
+        if str(text).isdigit():
+            self.selected_point = int(text)
+            self.count_try = 1
+            self.count_try_label_2.setText("1")
+        else:
+            QMessageBox.critical(self, "Ошибка", f"Введёно не число")
+
+    def updated_point_b(self):
+        self.create_session_folder(self.selected_point)
+        self.selected_point = int(self.selected_point)
+        self.selected_point += 1
+        self.count_try = 1
+        self.count_try_label_2.setText("1")
+        self.selected_point_count_input.setText(str(self.selected_point))
+    
+    def init_control_panel(self, main_layout):
+        control_layout = QHBoxLayout()
         
-        self.status_label = QLabel("Статус: Готов")
-        self.status_label.setStyleSheet("font: 14px; color: #666;")
+        back_btn = QPushButton("Назад")
+        back_btn.setFixedSize(100, 40)
+        back_btn.clicked.connect(self.return_to_main)
         
-        control_panel.addWidget(self.status_label)
-        control_panel.addStretch()
-        control_panel.addWidget(self.record_btn)
-        main_layout.addLayout(control_panel)
+        
+        mode_btn_layout = QHBoxLayout()
+        
+        if self.camera_mode == "video":
+            self.record_btn = QPushButton("Запись")
+            self.pause_btn = QPushButton("Пауза")
+            self.finish_btn = QPushButton("Закончить съёмку")
+            
+            self.record_btn.setStyleSheet("background-color: #27ae60; color: white;")
+            self.pause_btn.setStyleSheet("background-color: #f1c40f; color: black;")
+            self.finish_btn.setStyleSheet("background-color: #e74c3c; color: white;")
+            
+            self.record_btn.clicked.connect(self.start_recording)
+            self.pause_btn.clicked.connect(self.toggle_pause)
+            self.finish_btn.clicked.connect(self.finish_recording)
+            
+            mode_btn_layout.addWidget(self.record_btn)
+            mode_btn_layout.addWidget(self.pause_btn)
+            mode_btn_layout.addWidget(self.finish_btn)
+            
+            self.pause_btn.setEnabled(False)
+            self.finish_btn.setEnabled(False)
+            
+        else: 
+            self.shoot_btn = QPushButton("Сделать фото")
+            self.finish_btn = QPushButton("Закончить съёмку")
+            
+            self.shoot_btn.setStyleSheet("background-color: #27ae60; color: white;")
+            self.finish_btn.setStyleSheet("background-color: #e74c3c; color: white;")
+            
+            self.shoot_btn.clicked.connect(self.capture_photos)
+            self.finish_btn.clicked.connect(self.finish_photo_session)
+            
+            mode_btn_layout.addWidget(self.shoot_btn)
+            mode_btn_layout.addWidget(self.finish_btn)
+
+        control_layout.addWidget(back_btn)
+        control_layout.addStretch()
+        control_layout.addLayout(mode_btn_layout)
+        main_layout.addLayout(control_layout)
+
+    def create_session_folder(self, point=1):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder_name = "video" if self.camera_mode == "video" else "photo"
+        self.session_folder = os.path.join(folder_name, f"session_{timestamp}" if self.camera_mode == "video" else f"session_{timestamp}_point_{point}")
+        os.makedirs(self.session_folder, exist_ok=True)
+        return timestamp
 
     def init_cameras(self):
         # Автопоиск доступных камер
@@ -642,11 +704,12 @@ class ShootingControlPage(QWidget):
             layout.addWidget(preview_label)
             container.setLayout(layout)
             self.preview_grid.addWidget(container, i//2, i%2)
-            self.preview_labels[cam_id] = preview_label
+            with QMutexLocker(self.preview_mutex):
+                self.preview_labels[cam_id] = preview_label
             
             # Запуск потока захвата кадров
             self.start_camera_stream(cam_id)
-
+    
     def detect_available_cameras(self, max_check=4):
         available = []
         for i in range(max_check):
@@ -659,78 +722,164 @@ class ShootingControlPage(QWidget):
                 break
         return available
 
+    def start_recording(self):
+        time_start = self.create_session_folder()
+        self.is_recording = True
+        self.recording_paused = False
+        self.record_btn.setEnabled(False)
+        self.pause_btn.setEnabled(True)
+        self.finish_btn.setEnabled(True)
+        
+        for cam_id in self.camera_ids:
+            filename = os.path.join(self.session_folder, f"camera_{cam_id}.avi")
+            self.video_writers[cam_id] = cv2.VideoWriter(
+                filename, cv2.VideoWriter_fourcc(*'XVID'), 30.0, (1920, 1080))
+            with open(os.path.join(self.session_folder, f"session_{cam_id}.json"), 'w') as f:
+                json.dump({
+                    "greenHouse": self.window.state.location_data['complex'],
+                    "block": self.window.state.location_data['block'],
+                    "gardenBed": self.window.state.location_data['tray'],
+                    "gardenBedSide": self.window.state.location_data['side'],
+                    "fileURL": filename,
+                    "fileType": "video",
+                    "task": "crowns",
+                    "createDate": time_start
+                }, f)
+
+    def toggle_pause(self):
+        self.recording_paused = not self.recording_paused
+        self.pause_btn.setText("Продолжить" if self.recording_paused else "Пауза")
+
     def start_camera_stream(self, cam_id):
         worker = CameraWorker(cam_id)
-        worker.frame_ready.connect(
-            lambda cid, img, frame: self.update_preview(cid, img, frame)
-        )
+        worker.frame_ready.connect(self.update_preview)
         worker.start()
         self.workers.append(worker)
-
+    
     def update_preview(self, cam_id, qt_image, original_frame):
-        if isinstance(cam_id, np.ndarray):  # Если вдруг пришел массив
-            cam_id = int(cam_id[0])        # Преобразуем в int
+        locker = QMutexLocker(self.preview_mutex)  # Блокировка мьютекса
         
         if cam_id in self.preview_labels:
-            self.preview_labels[cam_id].setPixmap(
-                QPixmap.fromImage(qt_image).scaled(320, 240, 
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation)
-            )
+            preview_label = self.preview_labels[cam_id]
+            # Проверка на существование виджета
+            if preview_label and preview_label.parent() is not None:
+                preview_label.setPixmap(
+                    QPixmap.fromImage(qt_image).scaled(
+                        320, 240, 
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                )
         
-        if self.is_recording and self.camera_mode == "video":
+        if self.is_recording and self.camera_mode == "video" and not self.recording_paused:
             self.video_writers[cam_id].write(original_frame)
 
-    def toggle_recording(self):
-        if not self.is_recording:
-            self.start_recording()
-        else:
-            self.stop_recording()
+    def finish_recording(self):
+        self.is_recording = False
+        self.recording_paused = False
+        for writer in self.video_writers.values():
+            writer.release()
+        self.video_writers.clear()
+        self.record_btn.setEnabled(True)
+        self.pause_btn.setEnabled(False)
+        self.finish_btn.setEnabled(False)
+        self.window.navigate_to(MainPage)
 
-    def start_recording(self):
-        self.is_recording = True
-        self.status_label.setText("Статус: Запись...")
-        self.record_btn.setText("СТОП")
-        
-        if self.camera_mode == "video":
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            fourcc = cv2.VideoWriter_fourcc(*'XVID')
-            for cam_id in self.camera_ids:
-                self.video_writers[cam_id] = cv2.VideoWriter(
-                    f"video_{timestamp}_cam{cam_id}.avi",
-                    fourcc, 30, (3840, 2160)
-                )
-        else:
-            QTimer.singleShot(100, self.capture_photos)
+    def get_worker(self, cam_id):
+        """Возвращает worker для указанной камеры"""
+        for worker in self.workers:
+            if worker.camera_id == cam_id:
+                return worker
+        return None
 
     def capture_photos(self):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        for cam_id in self.camera_ids:
-            frame = self.workers[cam_id].last_frame  # Нужно добавить в CameraWorker
-            cv2.imwrite(f"photo_{timestamp}_cam{cam_id}.jpg", frame)
-        self.stop_recording()
+        try:
+            self.count_try += 1
+            self.count_try_label_2.setText(str(self.count_try))
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            for cam_id in self.camera_ids:
+                worker = self.get_worker(cam_id)
+                if worker and worker.last_frame is not None:
+                    filename = os.path.join(self.session_folder, 
+                                          f"photo_{timestamp}_num_{self.count_try}_cam{cam_id}.jpg")
+                    cv2.imwrite(filename, worker.last_frame)
+                    with open(os.path.join(self.session_folder, f"session_{cam_id}_try_{self.count_try}.json"), 'w') as f:
+                        json.dump({
+                            "greenHouse": self.window.state.location_data['complex'],
+                            "block": self.window.state.location_data['block'],
+                            "gardenBed": self.window.state.location_data['tray'],
+                            "gardenBedSide": self.window.state.location_data['side'],
+                            "gardenBedPoint": self.selected_point,
+                            "fileURL": filename,
+                            "fileType": "photo",
+                            "task": "crowns",
+                            "createDate": timestamp
+                        }, f)
+            
+            QMessageBox.information(self, "Успех", f"Фото сохранены в папку:\n{self.session_folder}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Ошибка при сохранении фото: {str(e)}")
 
-    def stop_recording(self):
-        self.is_recording = False
-        self.status_label.setText("Статус: Готов")
-        self.record_btn.setText("СТАРТ")
-        
-        if self.camera_mode == "video":
-            for writer in self.video_writers.values():
-                writer.release()
-            self.video_writers.clear()
+    def finish_photo_session(self):
+        self.cleanup()
+        self.window.navigate_to(MainPage)
+
+    def return_to_main(self):
+        self.cleanup()
+        self.window.navigate_to(MainPage)
 
     def cleanup(self):
         for worker in self.workers:
             worker.stop()
-        self.stop_recording()
+        with QMutexLocker(self.preview_mutex):
+            self.preview_labels.clear()
+        
+        if self.camera_mode == "video":
+            self.finish_recording()
+
+class CameraWorker(QThread):
+    frame_ready = Signal(int, QImage, np.ndarray)
+    
+    def __init__(self, camera_id):
+        super().__init__()
+        self.camera_id = camera_id
+        self.running = True
+        self.last_frame = None
+        self.mutex = QMutex()
+
+    def run(self):
+        cap = cv2.VideoCapture(self.camera_id)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 3840)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 2160)
+
+        while self.running:
+            with QMutexLocker(self.mutex):
+                if not self.running:
+                    break
+                
+                ret, frame = cap.read()
+                if ret:
+                    self.last_frame = frame.copy()
+                    preview = cv2.resize(frame, (640, 480))
+                    rgb_preview = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+                    h, w, ch = rgb_preview.shape
+                    qt_img = QImage(rgb_preview.data, w, h, QImage.Format.Format_RGB888)
+                    self.frame_ready.emit(self.camera_id, qt_img, frame)
+            QThread.msleep(30)
+        
+        cap.release()
+
+    def stop(self):
+        with QMutexLocker(self.mutex):
+            self.running = False
+        self.wait()
         
         
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    if not os.path.exists("photos"):
-        os.makedirs("photos")
-    if not os.path.exists("videos"):
-        os.makedirs("videos")
+    if not os.path.exists("photo"):
+        os.makedirs("photo")
+    if not os.path.exists("video"):
+        os.makedirs("video")
     window = MainWindow()
     sys.exit(app.exec())
